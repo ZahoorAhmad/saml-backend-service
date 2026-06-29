@@ -1,489 +1,374 @@
-# SAML 2.0 Multi-Tenant POC with Docker Compose
+# SAML Backend Service - Multi-Tenant POC
 
-A production-ready Proof of Concept demonstrating **Domain Discovery (Email Routing)** and **Just-In-Time (JIT) User Provisioning** using a multi-container SAML 2.0 architecture.
+A production-ready Go backend service implementing SAML 2.0 Service Provider (SP) with multi-tenant support, domain discovery, and Just-In-Time (JIT) user provisioning.
 
-## 🏗️ Architecture Overview
+## 🏗 Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    SAML POC Architecture                     │
-└─────────────────────────────────────────────────────────────┘
+### Core Components
 
-        USER BROWSER
-              │
-              ▼
-     ┌────────────────┐
-     │  Frontend App  │  (React/Vite + Nginx)
-     │  :3000         │
-     └────────┬───────┘
-              │
-              │ 1. Enter email: user@company.com
-              │
-              ▼
-     ┌────────────────────────────────────────┐
-     │  Backend Service                       │  (Go + Chi)
-     │  :8080                                 │  :8080
-     │                                        │
-     │  GET /api/v1/saml/connections/lookup   │
-     │      ?domain=company.com               │  2. Domain Discovery
-     │         ↓                              │
-     │  Returns: connection_id                │
-     │         ↓                              │
-     │  GET /api/v1/auth/sso/{id}/login       │  3. Initiate SSO
-     │         ↓                              │
-     │  Generates AuthnRequest                │
-     │         ↓                              │
-     │  Redirects to IdP                      │  4. Redirect to IdP
-     └────────┬───────────────────────────────┘
-              │
-              ▼
-     ┌────────────────────────┐
-     │   External IdP         │
-     │   (Okta/Azure/Okta)    │  5. User Authenticates
-     │                        │
-     │   SAML Response ──────┐│
-     │                       ││
-     └───────────────────────┘│
-                              │
-              6. POST SAML Response
-              ▼
-     ┌────────────────────────────────────────┐
-     │  Backend Service                       │
-     │  POST /api/v1/auth/sso/{id}/acs        │
-     │      ↓                                 │
-     │  Validate SAML Response                │
-     │      ↓                                 │
-     │  Extract: email, name, attributes     │  7. Extract Attributes
-     │      ↓                                 │
-     │  Domain Validation                     │  8. Validate Domain in
-     │  (Check allowed_domains)               │     AllowedDomains
-     │      ↓                                 │
-     │  JIT Provisioning:                     │  9. Create/Update User
-     │  Create or Update User                 │
-     │      ↓                                 │
-     │  Generate JWT Token                    │  10. Issue JWT
-     │      ↓                                 │
-     │  Redirect with Token:                  │
-     │  /dashboard?token={JWT}                │
-     └────────┬───────────────────────────────┘
-              │
-              ▼
-     ┌────────────────────┐
-     │  Frontend App      │
-     │  /dashboard        │  11. User Authenticated
-     │  (Token Stored)    │      Dashboard Ready
-     └────────────────────┘
-```
+- **Language**: Go 1.23+
+- **Router**: Native `net/http`
+- **Database**: In-memory thread-safe store with `sync.RWMutex`
+- **Authentication**: SAML 2.0 + JWT (HS256)
+- **JWT Lifetime**: 1 hour
 
-## 🚀 Quick Start with Docker Compose
+### Data Models
 
-### Prerequisites
-
-- Docker Engine 20.10+
-- Docker Compose 2.0+
-- Git
-
-### Clone and Run
-
-```bash
-# Clone the main repository
-git clone https://github.com/ZahoorAhmad/saml-poc-root.git
-cd saml-poc-root
-
-# Start both services
-docker-compose up --build
-```
-
-The system will be ready at:
-- **Frontend**: http://localhost:3000
-- **Backend**: http://localhost:8080
-
-## 📋 Service Configuration
-
-### Environment Variables (docker-compose.yml)
-
-**Backend Service:**
-```yaml
-PORT: "8080"
-DATABASE_URL: "sqlite:///./saml_tenants.db"
-JWT_SECRET: "super-secret-poc-signing-key-2026"
-BASE_URL: "http://localhost:8080"
-FRONTEND_URL: "http://localhost:3000"
-MOCK_TENANT_DOMAIN: "dev-tenant.com"
-MOCK_TENANT_NAME: "Default Workspace"
-```
-
-**Frontend Service:**
-```yaml
-VITE_API_BASE_URL: "http://localhost:8080"
-VITE_FRONTEND_URL: "http://localhost:3000"
-```
-
-## 🔍 Domain Discovery Flow
-
-### 1. User Enters Email
-```
-User enters: john@company.com
-```
-
-### 2. Frontend Extracts Domain
-```javascript
-const domain = email.split('@')[1]  // "company.com"
-```
-
-### 3. Call Domain Discovery Endpoint
-```bash
-GET /api/v1/saml/connections/lookup?domain=company.com
-
-Response:
-{
-  "found": true,
-  "connection_id": "acme-tenant-uuid",
-  "tenant_name": "Acme Inc",
-  "sso_endpoint": "http://localhost:8080/api/v1/auth/sso/acme/login"
-}
-```
-
-### 4. Redirect to SSO Login
-```javascript
-window.location.href = response.data.sso_endpoint
-```
-
-## 🔐 SAML Response Validation Flow
-
-### Backend ACS Endpoint Processing
-
-```
-1. POST /api/v1/auth/sso/{connection_id}/acs
-   │
-   ├─ Parse Form Data: SAMLResponse
-   ├─ Base64 Decode SAML Response
-   ├─ XML Parse & Signature Validation
-   │   └─ Verify using tenant's x509 certificate
-   ├─ Extract Attributes:
-   │   ├─ Email (urn:oid:0.9.2342.19200300.100.1.3)
-   │   ├─ Name (urn:oid:2.5.4.3)
-   │   └─ Other custom attributes
-   ├─ Extract Email Domain
-   ├─ Domain Validation:
-   │   ├─ Check if domain in AllowedDomains[]
-   │   └─ Reject if not allowed
-   ├─ JIT Provisioning:
-   │   ├─ Check if user exists in memory
-   │   ├─ If not: Create new user record
-   │   └─ If yes: Update last_login timestamp
-   ├─ Generate JWT Token:
-   │   ├─ Claim: sub (user_id)
-   │   ├─ Claim: email
-   │   ├─ Claim: name
-   │   ├─ Claim: roles (extracted from SAML)
-   │   ├─ Claim: tenant_id
-   │   └─ Signing: HS256 with JWT_SECRET
-   └─ Redirect: /dashboard?token={JWT}
-```
-
-## 📊 Just-In-Time (JIT) Provisioning
-
-### User Record Structure
-
+#### SamlConnection
+Represents a tenant's SAML configuration:
 ```go
-type ProvisionedUser struct {
-    ID                  string                   // UUID
-    Email               string                   // john@company.com
-    Name                string                   // John Doe
-    AccountType         string                   // "saml"
-    SAMLConnectionID    string                   // Connection UUID
-    Attributes          map[string][]string     // SAML attributes
-    CreatedAt           time.Time                // First login
-    LastLogin           time.Time                // Most recent login
-    LastAttributeUpdate time.Time                // Last attribute sync
+type SamlConnection struct {
+    ID              string    // UUID
+    Name            string    // Tenant name
+    IdpEntityID     string    // IdP identifier
+    IdpSSOURL       string    // IdP login endpoint
+    IdpCertificate  string    // X.509 PEM certificate
+    AllowedDomains  []string  // Email domains allowed for this tenant
+    EntityID        string    // Service Provider Entity ID
+    ACSUrl          string    // Assertion Consumer Service URL
+    CreatedAt       time.Time
 }
 ```
 
-### Provisioning Logic
-
-```
-IF user NOT EXISTS WITH (email, connection_id):
-    └─ CREATE new user record
-        ├─ ID: Generate UUID
-        ├─ Email: Extract from SAML
-        ├─ Name: Extract from SAML
-        ├─ CreatedAt: NOW()
-        └─ LastLogin: NOW()
-ELSE:
-    └─ UPDATE existing user
-        ├─ Name: Refresh from SAML
-        ├─ Attributes: Refresh from SAML
-        ├─ LastLogin: NOW()
-        └─ LastAttributeUpdate: NOW()
+#### User
+Represents a provisioned SAML user:
+```go
+type User struct {
+    ID               string    // UUID
+    Email            string    // User's email
+    Name             string    // User's display name
+    AccountType      string    // Always "saml"
+    SamlConnectionID string    // Associated tenant
+    CreatedAt        time.Time // Account creation time
+    LastLogin        time.Time // Most recent login
+}
 ```
 
-## 🔑 API Endpoints
+## 🔗 API Endpoints
 
-### Domain Discovery
+### 1. Domain Discovery
 
-```bash
-GET /api/v1/saml/connections/lookup?domain=company.com
+**Endpoint:** `GET /api/v1/saml/connections/lookup?domain=company.com`
 
-Response:
+**Description:** Unauthenticated endpoint for email-based tenant discovery.
+
+**Query Parameters:**
+- `domain`: Email domain suffix (e.g., "company.com")
+
+**Success Response (200):**
+```json
 {
   "found": true,
-  "connection_id": "tenant-uuid",
-  "tenant_name": "Company Name",
-  "sso_endpoint": "http://localhost:8080/api/v1/auth/sso/tenant-slug/login"
+  "connection_id": "550e8400-e29b-41d4-a716-446655440000",
+  "tenant_name": "Acme Inc",
+  "sso_endpoint": "http://localhost:8080/api/v1/saml/login/550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-### SAML Metadata (for IdP Configuration)
-
-```bash
-GET /api/v1/auth/sso/{tenant_slug}/metadata
-
-Returns: XML ServiceProvider Metadata
+**Not Found Response (404):**
+```json
+{
+  "found": false,
+  "error": "No SSO configuration found for this domain"
+}
 ```
 
-### Initiate SSO
+### 2. Create SAML Connection
 
-```bash
-GET /api/v1/auth/sso/{tenant_slug}/login
+**Endpoint:** `POST /api/v1/saml/connections`
 
-Action: Generates AuthnRequest and redirects to IdP
+**Request Body:**
+```json
+{
+  "name": "Acme Inc",
+  "idp_entity_id": "https://idp.example.com",
+  "idp_sso_url": "https://idp.example.com/sso",
+  "idp_certificate": "-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----",
+  "allowed_domains": ["acme.com", "example.com"]
+}
 ```
 
-### Handle SAML Response (ACS)
-
-```bash
-POST /api/v1/auth/sso/{tenant_slug}/acs
-Content-Type: application/x-www-form-urlencoded
-
-Payload:
-- SAMLResponse: [base64-encoded-xml]
-- RelayState: [relay-state-value]
-
-Action: Validates, provisions user, issues JWT
-Redirect: /dashboard?token={JWT}
+**Success Response (201):**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Acme Inc",
+  "idp_entity_id": "https://idp.example.com",
+  "idp_sso_url": "https://idp.example.com/sso",
+  "allowed_domains": ["acme.com"],
+  "entity_id": "http://localhost:8080/saml/Acme Inc",
+  "acs_url": "http://localhost:8080/api/v1/saml/acs/Acme Inc",
+  "created_at": "2024-01-01T00:00:00Z"
+}
 ```
 
-### Validate Token
+### 3. Initiate SAML Login
 
-```bash
-GET /api/v1/auth/validate
-Authorization: Bearer {jwt_token}
+**Endpoint:** `GET /api/v1/saml/login/{connection_id}`
 
-Response:
+**Description:** Initiates SP-initiated SAML authentication flow.
+
+**Action:**
+1. Generates SAML AuthnRequest XML
+2. Base64-encodes and packages request
+3. Generates RelayState token
+4. Redirects browser to IdP SSO URL
+
+**Response:** HTTP 302 redirect to IdP
+
+### 4. SAML Assertion Consumer Service (ACS)
+
+**Endpoint:** `POST /api/v1/saml/acs/{connection_id}`
+
+**Description:** Receives and validates SAML response from IdP.
+
+**Request Body:** `application/x-www-form-urlencoded`
+```
+SAMLResponse=<base64-encoded-xml>&RelayState=<relay-state>
+```
+
+**Processing Steps:**
+1. ✅ Decode Base64 SAML Response
+2. ✅ Validate XML signature (2-minute clock skew)
+3. ✅ Extract email and name attributes
+4. ✅ Validate email domain against `AllowedDomains`
+5. ✅ **JIT Provisioning**: Create user if not exists, else update last_login
+6. ✅ Generate JWT token (HS256)
+7. ✅ Redirect to frontend with token
+
+**Success Response:** HTTP 302 redirect
+```
+Location: http://localhost:3000/dashboard?token=eyJhbGc...
+```
+
+**Validation Errors:**
+- Missing SAML Response → 400 Bad Request
+- Signature validation fails → 401 Unauthorized
+- Domain not allowed → 401 Unauthorized
+- Connection not found → 404 Not Found
+
+### 5. Service Provider Metadata
+
+**Endpoint:** `GET /api/v1/saml/metadata/{connection_id}`
+
+**Description:** Returns XML Service Provider metadata (used to configure IdP).
+
+**Response:** `application/xml`
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="http://localhost:8080/saml/...">
+  <SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</NameIDFormat>
+    <AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="http://localhost:8080/api/v1/saml/acs/..." isDefault="true" index="0" />
+  </SPSSODescriptor>
+</EntityDescriptor>
+```
+
+### 6. Token Validation
+
+**Endpoint:** `GET /api/v1/auth/validate`
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Success Response (200):**
+```json
 {
   "valid": true,
   "user": {
     "id": "user-uuid",
     "email": "john@company.com",
     "name": "John Doe",
-    "roles": ["user"],
-    "tenant_id": "connection-uuid"
+    "account_type": "saml",
+    "saml_connection_id": "connection-uuid"
   }
 }
 ```
 
-## 🧪 Testing Setup
-
-### Option 1: Okta Free Developer Account
-
-1. **Create Account**
-   - Go to https://developer.okta.com
-   - Sign up for free developer account
-   - Verify email
-
-2. **Create SAML App**
-   - Navigate to: Applications → Applications → Create App
-   - Choose: SAML 2.0
-   - Configure:
-     - **Single sign-on URL**: `http://localhost:8080/api/v1/auth/sso/okta-test/acs`
-     - **Audience URI**: `http://localhost:8080/api/v1/auth/sso/okta-test`
-
-3. **Configure Attributes** (Okta → Sign On → Edit SAML Configuration)
-   - Attribute Statements:
-     - `email` = `user.email`
-     - `name` = `user.firstName + " " + user.lastName`
-
-4. **Get IdP Metadata**
-   - Find the metadata URL or download XML
-   - Format: `https://{your-okta-domain}/app/{app-id}/sso/saml/metadata`
-
-5. **Create Backend Tenant**
-   ```bash
-   curl -X POST http://localhost:8080/api/v1/tenants \
-     -H "Content-Type: application/json" \
-     -d '{
-       "name": "Okta Test",
-       "slug": "okta-test",
-       "idp_metadata_url": "https://your-okta-domain/app/xxx/sso/saml/metadata",
-       "idp_entity_id": "https://your-okta-domain",
-       "target_redirect_url": "http://localhost:3000/dashboard"
-     }'
-   ```
-
-6. **Test Login**
-   - Visit http://localhost:3000
-   - Enter email: `{your-okta-user}@{your-okta-domain}`
-   - You'll be redirected to Okta login
-   - After authentication, JWT will be issued
-
-### Option 2: MockSAML.com
-
-1. **Download SP Metadata**
-   ```bash
-   curl http://localhost:8080/api/v1/auth/sso/test/metadata > sp-metadata.xml
-   ```
-
-2. **Upload to MockSAML**
-   - Go to https://www.mocksaml.com
-   - Click "Upload Metadata"
-   - Upload the `sp-metadata.xml` file
-   - MockSAML will generate IdP metadata
-
-3. **Configure Backend**
-   - Get IdP metadata URL from MockSAML (usually shows on upload page)
-   - Create tenant with this metadata
-
-4. **Test Login**
-   - Visit http://localhost:3000
-   - Enter any email: `test@company.com`
-   - Follow SAML flow through MockSAML
-   - Receive JWT on successful auth
-
-## 📁 Project Structure
-
+**Failure Response (401):**
 ```
-saml-poc-root/
-├── docker-compose.yml              # Central orchestration
-├── README.md                       # This file
-│
-├── saml-backend-service/           # Go Backend
-│   ├── Dockerfile
-│   ├── cmd/
-│   │   └── server/
-│   │       └── main.go
-│   ├── internal/
-│   │   ├── config/
-│   │   │   └── config.go
-│   │   ├── db/
-│   │   │   ├── db.go
-│   │   │   ├── models.go
-│   │   │   ├── tenant.go
-│   │   │   └── user.go
-│   │   ├── handler/
-│   │   │   ├── tenant.go
-│   │   │   ├── saml.go
-│   │   │   ├── auth.go
-│   │   │   ├── discovery.go
-│   │   │   └── middleware.go
-│   │   ├── saml/
-│   │   │   ├── sp.go
-│   │   │   ├── validator.go
-│   │   │   ├── metadata.go
-│   │   │   ├── domain.go
-│   │   │   └── jit.go
-│   │   └── jwt/
-│   │       └── token.go
-│   ├── go.mod
-│   ├── go.sum
-│   └── README.md
-│
-└── saml-frontend-app/              # React Frontend
-    ├── Dockerfile
-    ├── nginx.conf
-    ├── src/
-    │   ├── components/
-    │   │   ├── TenantLogin.tsx
-    │   │   ├── AdminDashboard.tsx
-    │   │   ├── AppDashboard.tsx
-    │   │   ├── ProtectedRoute.tsx
-    │   │   └── Layout.tsx
-    │   ├── context/
-    │   │   └── AuthContext.tsx
-    │   ├── services/
-    │   │   └── api.ts
-    │   ├── utils/
-    │   │   └── jwt.ts
-    │   ├── App.tsx
-    │   ├── index.css
-    │   └── main.tsx
-    ├── package.json
-    ├── vite.config.ts
-    ├── tsconfig.json
-    └── README.md
+Invalid token
 ```
 
-## 🛑 Troubleshooting
+## 🔄 Authentication Flow
 
-### Backend Won't Start
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     SAML Authentication Flow                     │
+└─────────────────────────────────────────────────────────────────┘
+
+1. USER INITIATES
+   └─ Frontend: Email input (user@company.com)
+
+2. DOMAIN DISCOVERY
+   └─ GET /api/v1/saml/connections/lookup?domain=company.com
+   └─ Backend returns: connection_id + sso_endpoint
+
+3. SSO INITIATION
+   └─ Redirect: GET /api/v1/saml/login/{connection_id}
+   └─ Backend:
+      • Generates AuthnRequest XML
+      • Base64-encodes request
+      • Generates RelayState token
+      • Redirects to IdP SSO URL
+
+4. IDP AUTHENTICATION
+   └─ User authenticates at IdP (Okta, Azure, etc.)
+   └─ IdP verifies credentials
+   └─ IdP generates SAML Response
+
+5. ACS CALLBACK
+   └─ IdP POSTs SAML Response to: POST /api/v1/saml/acs/{connection_id}
+   └─ Backend validates:
+      • XML signature
+      • Clock skew (±2 minutes)
+      • Email domain in AllowedDomains
+
+6. JIT PROVISIONING
+   └─ Check if user exists (connectionID:email key)
+   └─ If NOT EXISTS:
+      • Create new User record
+      • Set CreatedAt = NOW
+      • Log provisioning event
+   └─ If EXISTS:
+      • Update LastLogin = NOW
+
+7. JWT ISSUANCE
+   └─ Generate JWT token:
+      • Claim: sub = user_id
+      • Claim: email
+      • Claim: name
+      • Claim: account_type = "saml"
+      • Claim: saml_connection_id
+      • Signing: HS256 + JWT_SECRET
+      • Expiration: +1 hour
+
+8. REDIRECT TO FRONTEND
+   └─ HTTP 302 redirect:
+   └─ Location: http://localhost:3000/dashboard?token={JWT}
+
+9. FRONTEND TOKEN STORAGE
+   └─ Frontend extracts token from URL
+   └─ Stores in localStorage
+   └─ Clears URL query parameters
+   └─ Renders dashboard with user info
+```
+
+## 🌐 Just-In-Time (JIT) Provisioning
+
+When a SAML response arrives at the ACS endpoint:
+
+```go
+// Simplified logic:
+if user NOT EXISTS with (connection_id, email) {
+    // CREATE NEW USER
+    new_user := User{
+        ID: UUID(),
+        Email: extracted_from_saml,
+        Name: extracted_from_saml,
+        AccountType: "saml",
+        SamlConnectionID: connection_id,
+        CreatedAt: NOW,
+        LastLogin: NOW,
+    }
+    store.users[connection_id + ":" + email] = new_user
+    log("JIT Provisioned:", email)
+} else {
+    // UPDATE EXISTING USER
+    existing_user.LastLogin = NOW
+    existing_user.Name = extracted_from_saml  // Refresh attributes
+}
+```
+
+**Benefits:**
+- ✅ Zero friction onboarding
+- ✅ No manual user management needed
+- ✅ Automatic attribute synchronization
+- ✅ Supports unlimited users per tenant
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Go 1.23+
+- Docker (optional)
+
+### Installation
 
 ```bash
-# Check logs
-docker-compose logs backend
+# Clone repository
+git clone https://github.com/ZahoorAhmad/saml-backend-service.git
+cd saml-backend-service
 
-# Common issues:
-# 1. Port 8080 already in use
-#    Solution: Change PORT env var in docker-compose.yml
-# 2. Database permission error
-#    Solution: Remove ./saml_tenants.db and restart
+# Install dependencies
+go mod download
+
+# Run locally
+go run ./cmd/server
 ```
 
-### Frontend Can't Connect to Backend
+### Docker
 
 ```bash
-# Check CORS
-# Ensure VITE_API_BASE_URL matches backend URL
-docker-compose logs frontend
+# Build image
+docker build -t saml-backend:latest .
 
-# Test connectivity
-curl http://localhost:8080/health
+# Run container
+docker run -p 8080:8080 \
+  -e JWT_SECRET="your-secret-key" \
+  -e FRONTEND_URL="http://localhost:3000" \
+  -e MOCK_TENANT_DOMAIN="dev-tenant.com" \
+  -e MOCK_TENANT_NAME="Development" \
+  saml-backend:latest
 ```
 
-### SAML Response Validation Fails
+### Environment Variables
 
-```
-Issues:
-1. IdP certificate mismatch
-   → Verify certificate in tenant config
-2. Domain not in allowed list
-   → Add domain to tenant configuration
-3. Clock skew > 2 minutes
-   → Sync container clocks
+```bash
+JWT_SECRET=super-secret-poc-signing-key-2026          # JWT signing key
+FRONTEND_URL=http://localhost:3000                     # Frontend origin for CORS
+PORT=8080                                               # Server port
+MOCK_TENANT_DOMAIN=dev-tenant.com                       # Mock tenant domain
+MOCK_TENANT_NAME=Development Workspace                 # Mock tenant name
 ```
 
-## 🔒 Security Considerations
+## 🧪 Testing
 
-✅ **Implemented:**
-- SAML signature validation
-- JWT token expiration (1 hour)
-- HttpOnly cookies
-- CORS protection
-- Domain-based validation
+### 1. Test Domain Discovery
 
-⚠️ **Production Checklist:**
-- [ ] Use HTTPS/TLS (not HTTP)
-- [ ] Rotate JWT_SECRET regularly
-- [ ] Enable SAML assertion encryption
-- [ ] Store secrets in secure vault (AWS Secrets Manager, etc.)
-- [ ] Implement rate limiting
-- [ ] Add audit logging
-- [ ] Enable CSRF tokens
-- [ ] Use persistent database (PostgreSQL)
+```bash
+curl -X GET "http://localhost:8080/api/v1/saml/connections/lookup?domain=dev-tenant.com"
+```
 
-## 📝 License
+### 2. Create New Connection
+
+```bash
+curl -X POST http://localhost:8080/api/v1/saml/connections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Okta Test",
+    "idp_entity_id": "https://okta.example.com",
+    "idp_sso_url": "https://okta.example.com/sso",
+    "idp_certificate": "-----BEGIN CERTIFICATE-----...",
+    "allowed_domains": ["example.com"]
+  }'
+```
+
+### 3. Get SP Metadata
+
+```bash
+curl -X GET http://localhost:8080/api/v1/saml/metadata/{connection_id}
+```
+
+### 4. Validate Token
+
+```bash
+curl -X GET http://localhost:8080/api/v1/auth/validate \
+  -H "Authorization: Bearer {jwt_token}"
+```
+
+## 📋 License
 
 MIT
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create feature branch
-3. Submit pull request
-
-## 📧 Support
-
-For issues or questions:
-- Open GitHub Issue
-- Check troubleshooting section above
-- Review endpoint documentation
