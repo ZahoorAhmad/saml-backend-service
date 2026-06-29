@@ -61,6 +61,13 @@ type InMemoryStore struct {
 var store *InMemoryStore
 var jwtSecret string
 var frontendURL string
+var backendURL string
+var allowedOrigins []string
+
+type relayPayload struct {
+	ReturnURL string `json:"return_url"`
+	Nonce     string `json:"nonce"`
+}
 
 func init() {
 	store = &InMemoryStore{
@@ -78,6 +85,21 @@ func init() {
 		frontendURL = "http://localhost:3000"
 	}
 
+	backendURL = os.Getenv("BACKEND_URL")
+	if backendURL == "" {
+		backendURL = "http://localhost:8080"
+	}
+
+	allowedOrigins = []string{frontendURL}
+	if extra := os.Getenv("ALLOWED_ORIGINS"); extra != "" {
+		for _, origin := range strings.Split(extra, ",") {
+			origin = strings.TrimSpace(origin)
+			if origin != "" {
+				allowedOrigins = append(allowedOrigins, origin)
+			}
+		}
+	}
+
 	// Seed mock tenant if configured
 	mockDomain := os.Getenv("MOCK_TENANT_DOMAIN")
 	mockName := os.Getenv("MOCK_TENANT_NAME")
@@ -88,17 +110,16 @@ func init() {
 
 func seedMockTenant(domain, name string) {
 	connID := uuid.New().String()
-	slug := strings.ToLower(strings.ReplaceAll(domain, ".", "-"))
 
 	conn := &SamlConnection{
 		ID:             connID,
 		Name:           name,
-		IdpEntityID:    "https://" + domain,
-		IdpSSOURL:      "https://" + domain + "/sso",
+		IdpEntityID:    backendURL + "/api/v1/saml/mock-idp/" + connID,
+		IdpSSOURL:      backendURL + "/api/v1/saml/mock-idp/" + connID,
 		IdpCertificate: "MIIDXTCCAkWgAwIBAgIJAJC1/iNAZwqDMA0GCSqGSIb3DQEBBQUAMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwHhcNMjIwMTAxMDAwMDAwWhcNMjMwMTAxMDAwMDAwWjBFMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1234567890",
-		AllowedDomains: []string{domain},
-		EntityID:       "http://localhost:8080/saml/" + slug,
-		ACSURL:         "http://localhost:8080/api/v1/saml/acs/" + slug,
+		AllowedDomains: []string{domain, "example.com", "company.com"},
+		EntityID:       backendURL + "/saml/" + connID,
+		ACSURL:         backendURL + "/api/v1/saml/acs/" + connID,
 		CreatedAt:      time.Now(),
 	}
 
@@ -122,6 +143,7 @@ func main() {
 	http.HandleFunc("/api/v1/saml/connections", handleCreateConnection)
 	http.HandleFunc("/api/v1/saml/connections/lookup", handleLookup)
 	http.HandleFunc("/api/v1/saml/login/", handleLogin)
+	http.HandleFunc("/api/v1/saml/mock-idp/", handleMockIdP)
 	http.HandleFunc("/api/v1/saml/acs/", handleACS)
 	http.HandleFunc("/api/v1/saml/metadata/", handleMetadata)
 
@@ -146,7 +168,19 @@ func main() {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", frontendURL)
+		origin := r.Header.Get("Origin")
+		allowedOrigin := ""
+		for _, candidate := range allowedOrigins {
+			if origin == candidate {
+				allowedOrigin = origin
+				break
+			}
+		}
+		if allowedOrigin == "" && len(allowedOrigins) > 0 {
+			allowedOrigin = allowedOrigins[0]
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -195,8 +229,8 @@ func handleCreateConnection(w http.ResponseWriter, r *http.Request) {
 		IdpSSOURL:      req.IdpSSOURL,
 		IdpCertificate: req.IdpCertificate,
 		AllowedDomains: req.AllowedDomains,
-		EntityID:       "http://localhost:8080/saml/" + req.Name,
-		ACSURL:         "http://localhost:8080/api/v1/saml/acs/" + req.Name,
+		EntityID:       backendURL + "/saml/" + req.Name,
+		ACSURL:         backendURL + "/api/v1/saml/acs/" + connID,
 		CreatedAt:      time.Now(),
 	}
 
@@ -233,7 +267,7 @@ func handleLookup(w http.ResponseWriter, r *http.Request) {
 					"found":           true,
 					"connection_id":   conn.ID,
 					"tenant_name":     conn.Name,
-					"sso_endpoint":    fmt.Sprintf("http://localhost:8080/api/v1/saml/login/%s", conn.ID),
+					"sso_endpoint":    fmt.Sprintf("%s/api/v1/saml/login/%s", backendURL, conn.ID),
 				})
 				return
 			}
@@ -262,22 +296,105 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Generate AuthnRequest
 	authorequest := generateAuthnRequest(conn.ID, conn.EntityID, conn.ACSURL)
-	encodedRequest := base64.StdEncoding.EncodeToString([]byte(authorequeset))
+	encodedRequest := base64.StdEncoding.EncodeToString([]byte(authorequest))
 
-	// Generate RelayState
-	relayState := generateRelayState(connectionID)
+	// Generate RelayState with optional return URL from the client app
+	returnURL := r.URL.Query().Get("return_url")
+	if returnURL == "" {
+		returnURL = frontendURL
+	}
+	relayState := encodeRelayState(returnURL)
 
 	// Store relay state in session (for POC, just logging)
 	log.Printf("Generated AuthnRequest for connection: %s, RelayState: %s", connectionID, relayState)
 
-	// Redirect to IdP
+	// Redirect to mock/real IdP
 	idpURL := fmt.Sprintf("%s?SAMLRequest=%s&RelayState=%s",
 		conn.IdpSSOURL,
-		base64.StdEncoding.EncodeToString([]byte(authorequeset)),
+		encodedRequest,
 		relayState,
 	)
 
 	http.Redirect(w, r, idpURL, http.StatusFound)
+}
+
+func handleMockIdP(w http.ResponseWriter, r *http.Request) {
+	connectionID := strings.TrimPrefix(r.URL.Path, "/api/v1/saml/mock-idp/")
+
+	store.mu.RLock()
+	conn, exists := store.connections[connectionID]
+	store.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, "Connection not found", http.StatusNotFound)
+		return
+	}
+
+	relayState := r.URL.Query().Get("RelayState")
+	if relayState == "" {
+		relayState = encodeRelayState(frontendURL)
+	}
+
+	defaultDomain := conn.AllowedDomains[0]
+	defaultEmail := "user@" + defaultDomain
+
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Failed to parse form", http.StatusBadRequest)
+			return
+		}
+
+		email := strings.TrimSpace(r.FormValue("email"))
+		if email == "" {
+			email = defaultEmail
+		}
+		name := strings.TrimSpace(r.FormValue("name"))
+		if name == "" {
+			name = strings.Split(email, "@")[0]
+		}
+
+		samlResponse := generateMockSAMLResponse(email, name)
+		encodedResponse := base64.StdEncoding.EncodeToString([]byte(samlResponse))
+		acsURL := backendURL + "/api/v1/saml/acs/" + connectionID
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><title>Mock IdP</title></head>
+<body onload="document.getElementById('saml-form').submit()">
+  <p>Signing you in...</p>
+  <form id="saml-form" method="POST" action="%s">
+    <input type="hidden" name="SAMLResponse" value="%s" />
+    <input type="hidden" name="RelayState" value="%s" />
+  </form>
+</body></html>`, acsURL, encodedResponse, relayState)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><title>Mock SAML IdP - %s</title>
+<style>
+  body { font-family: sans-serif; background: #f8fafc; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+  .card { background:white; padding:2rem; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.08); width:100%%; max-width:420px; }
+  h1 { margin:0 0 .5rem; font-size:1.5rem; }
+  p { color:#64748b; margin:0 0 1.5rem; }
+  label { display:block; font-size:.875rem; margin-bottom:.25rem; color:#334155; }
+  input { width:100%%; padding:.75rem; border:1px solid #cbd5e1; border-radius:8px; margin-bottom:1rem; }
+  button { width:100%%; padding:.75rem; background:#2563eb; color:white; border:none; border-radius:8px; font-weight:600; cursor:pointer; }
+</style></head>
+<body>
+  <div class="card">
+    <h1>%s</h1>
+    <p>Mock SAML Identity Provider (POC)</p>
+    <form method="POST">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" value="%s" required />
+      <label for="name">Display Name</label>
+      <input id="name" name="name" type="text" value="SAML User" />
+      <button type="submit">Sign in with SSO</button>
+    </form>
+  </div>
+</body></html>`, conn.Name, conn.Name, defaultEmail)
 }
 
 func handleACS(w http.ResponseWriter, r *http.Request) {
@@ -367,9 +484,13 @@ func handleACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to frontend dashboard with token
-	dashboardURL := fmt.Sprintf("%s/dashboard?token=%s", frontendURL, token)
-	http.Redirect(w, r, dashboardURL, http.StatusFound)
+	// Redirect to client app with token
+	returnURL := decodeRelayState(r.PostFormValue("RelayState"))
+	if returnURL == "" {
+		returnURL = frontendURL
+	}
+	redirectURL := appendTokenToURL(returnURL, token)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
 func handleMetadata(w http.ResponseWriter, r *http.Request) {
@@ -452,6 +573,52 @@ func generateRelayState(connectionID string) string {
 	randomBytes := make([]byte, 16)
 	io.ReadFull(rand.Reader, randomBytes)
 	return base64.URLEncoding.EncodeToString(randomBytes)
+}
+
+func encodeRelayState(returnURL string) string {
+	payload := relayPayload{
+		ReturnURL: returnURL,
+		Nonce:     generateRelayState(""),
+	}
+	data, _ := json.Marshal(payload)
+	return base64.URLEncoding.EncodeToString(data)
+}
+
+func decodeRelayState(relayState string) string {
+	if relayState == "" {
+		return ""
+	}
+
+	decoded, err := base64.URLEncoding.DecodeString(relayState)
+	if err != nil {
+		return ""
+	}
+
+	var payload relayPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return ""
+	}
+
+	return payload.ReturnURL
+}
+
+func appendTokenToURL(rawURL, token string) string {
+	if strings.Contains(rawURL, "?") {
+		return rawURL + "&token=" + token
+	}
+	return rawURL + "?token=" + token
+}
+
+func generateMockSAMLResponse(email, name string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
+  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+    <saml:AttributeStatement>
+      <saml:Attribute Name="email"><saml:AttributeValue>%s</saml:AttributeValue></saml:Attribute>
+      <saml:Attribute Name="name"><saml:AttributeValue>%s</saml:AttributeValue></saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>`, email, name)
 }
 
 func generateSPMetadata(entityID, acsURL string) string {

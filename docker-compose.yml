@@ -1,16 +1,16 @@
-version: '3.8'
-
 services:
   backend:
     build:
-      context: ./saml-backend-service
+      context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "${BACKEND_PORT:-8080}:8080"
     environment:
       PORT: "8080"
       JWT_SECRET: "super-secret-poc-signing-key-2026"
-      FRONTEND_URL: "http://localhost:3000"
+      BACKEND_URL: "http://localhost:${BACKEND_PORT:-8080}"
+      FRONTEND_URL: "http://localhost:${FRONTEND_PORT:-3000}"
+      ALLOWED_ORIGINS: "http://localhost:${FRONTEND_PORT:-3000},http://localhost:${DUKAN_PRO_PORT:-3001}"
       MOCK_TENANT_DOMAIN: "dev-tenant.com"
       MOCK_TENANT_NAME: "Default Workspace"
     networks:
@@ -23,13 +23,28 @@ services:
 
   frontend:
     build:
-      context: ./saml-frontend-app
+      context: ../saml-frontend-app
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
-      VITE_API_BASE_URL: "http://localhost:8080"
-      VITE_FRONTEND_URL: "http://localhost:3000"
+      VITE_API_BASE_URL: "http://localhost:${BACKEND_PORT:-8080}"
+      VITE_FRONTEND_URL: "http://localhost:${FRONTEND_PORT:-3000}"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - saml-network
+
+  dukan-pro:
+    build:
+      context: ../dukan-pro
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: "http://localhost:${BACKEND_PORT:-8080}"
+        VITE_FRONTEND_URL: "http://localhost:${DUKAN_PRO_PORT:-3001}"
+    ports:
+      - "${DUKAN_PRO_PORT:-3001}:3001"
     depends_on:
       backend:
         condition: service_healthy
