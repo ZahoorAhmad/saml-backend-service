@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./saml-backend-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      JWT_SECRET: "super-secret-poc-signing-key-2026"
+      FRONTEND_URL: "http://localhost:3000"
+      MOCK_TENANT_DOMAIN: "dev-tenant.com"
+      MOCK_TENANT_NAME: "Default Workspace"
+    networks:
+      - saml-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./saml-frontend-app
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_BASE_URL: "http://localhost:8080"
+      VITE_FRONTEND_URL: "http://localhost:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - saml-network
+
+networks:
+  saml-network:
+    driver: bridge
