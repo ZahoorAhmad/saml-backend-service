@@ -2,13 +2,45 @@
 set -euo pipefail
 
 # Sets DOCKER and COMPOSE command arrays. Uses sudo when snap Docker cannot stop containers.
+# Requires Docker Compose v2 (`docker compose`). Legacy `docker-compose` v1 breaks with
+# modern Docker Engine (KeyError: 'id' in watch_events).
+
+require_compose_v2() {
+  local prefix=("$@")
+  if "${prefix[@]}" docker compose version &>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+print_compose_v2_required() {
+  cat <<'EOF'
+Docker Compose v2 is required (`docker compose`).
+
+The legacy Python package `docker-compose` v1 is incompatible with modern Docker Engine
+and fails with: KeyError: 'id' in watch_events
+
+Install the v2 plugin:
+
+  sudo apt update
+  sudo apt install docker-compose-plugin
+
+Then run:
+
+  docker compose up -d --build
+
+Or use the project wrapper:
+
+  ./scripts/compose.sh up -d --build
+EOF
+}
+
 detect_docker_commands() {
-  if docker compose version &>/dev/null; then
+  if require_compose_v2; then
     COMPOSE=(docker compose)
-  elif command -v docker-compose &>/dev/null; then
-    COMPOSE=(docker-compose)
   else
-    echo "Docker Compose is not installed." >&2
+    echo "Docker Compose v2 plugin is not available." >&2
+    print_compose_v2_required
     exit 1
   fi
 
@@ -49,9 +81,12 @@ detect_docker_commands() {
     CHECK_CONTAINER=""
     trap - RETURN
     DOCKER=(sudo docker)
-    COMPOSE=(sudo docker compose)
-    if ! sudo docker compose version &>/dev/null; then
-      COMPOSE=(sudo docker-compose)
+    if require_compose_v2 sudo; then
+      COMPOSE=(sudo docker compose)
+    else
+      echo "sudo docker compose is not available." >&2
+      print_compose_v2_required
+      exit 1
     fi
     echo "Using sudo for Docker (required to stop/recreate containers with snap Docker)." >&2
     return 0

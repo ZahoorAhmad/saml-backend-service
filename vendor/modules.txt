@@ -1,6 +1,30 @@
+# github.com/beevik/etree v1.1.0
+## explicit
+github.com/beevik/etree
+# github.com/crewjam/saml v0.4.14
+## explicit; go 1.19
+github.com/crewjam/saml
+github.com/crewjam/saml/logger
+github.com/crewjam/saml/xmlenc
 # github.com/golang-jwt/jwt/v5 v5.2.0
 ## explicit; go 1.18
 github.com/golang-jwt/jwt/v5
-# github.com/google/uuid v1.6.0
-## explicit
-github.com/google/uuid
+# github.com/jonboulle/clockwork v0.2.2
+## explicit; go 1.13
+github.com/jonboulle/clockwork
+# github.com/lib/pq v1.10.9
+## explicit; go 1.13
+github.com/lib/pq
+github.com/lib/pq/oid
+github.com/lib/pq/scram
+# github.com/mattermost/xml-roundtrip-validator v0.1.0
+## explicit; go 1.14
+github.com/mattermost/xml-roundtrip-validator
+# github.com/russellhaering/goxmldsig v1.3.0
+## explicit; go 1.15
+github.com/russellhaering/goxmldsig
+github.com/russellhaering/goxmldsig/etreeutils
+github.com/russellhaering/goxmldsig/types
+# golang.org/x/crypto v0.14.0
+## explicit; go 1.17
+golang.org/x/crypto/ripemd160
